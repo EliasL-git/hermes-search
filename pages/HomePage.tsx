@@ -1,5 +1,5 @@
 import React from "react"
-import { Search, Loader2, FileText, AlertCircle } from "lucide-react"
+import { Search, Loader2, AlertCircle } from "lucide-react"
 import { Button } from "@workspace/ui/components/button"
 import { Input } from "@workspace/ui/components/input"
 import { PageContainer } from "../components/PageContainer"
@@ -7,15 +7,43 @@ import { PageContainer } from "../components/PageContainer"
 interface SearchResult {
   title: string
   url: string
-  snippet?: string
-  scrapedContent?: string
+  snippet: string
 }
 
-interface WorkflowResponse {
-  success?: boolean
-  results?: SearchResult[]
-  error?: string
-  message?: string
+async function searchDuckDuckGo(query: string, signal?: AbortSignal): Promise<SearchResult[]> {
+  const url = `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`
+  const resp = await fetch(url, { signal })
+
+  if (!resp.ok) {
+    throw new Error(`DuckDuckGo returned ${resp.status}`)
+  }
+
+  const html = await resp.text()
+  const results: SearchResult[] = []
+
+  const rowRegex = /<tr[^>]*>.*?<\/tr>/gis
+  const rows = html.match(rowRegex) || []
+
+  for (const row of rows) {
+    if (row.includes("ad_domain=")) continue
+
+    const linkMatch = row.match(/<a[^>]+href=["']([^"']*uddg=[^"']+)["'][^>]*>(.*?)<\/a>/is)
+    if (!linkMatch) continue
+
+    const rawHref = linkMatch[1]
+    const urlMatch = rawHref.match(/[?&]uddg=([^&]+)/i)
+    if (!urlMatch) continue
+    const resultUrl = decodeURIComponent(urlMatch[1])
+
+    const title = linkMatch[2].replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim()
+
+    const snippetMatch = row.match(/<td[^>]+class=['"]result-snippet['"][^>]*>(.*?)<\/td>/is)
+    const snippet = snippetMatch ? snippetMatch[1].replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim() : ""
+
+    results.push({ title, url: resultUrl, snippet })
+  }
+
+  return results
 }
 
 export default function HomePage() {
@@ -29,11 +57,15 @@ export default function HomePage() {
 
   async function handleSearch(e?: React.FormEvent) {
     if (e) e.preventDefault()
+
     const trimmed = query.trim()
     if (!trimmed) return
+
     if (isLoading) return
 
-    if (abortControllerRef.current) abortControllerRef.current.abort()
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort()
+    }
     const controller = new AbortController()
     abortControllerRef.current = controller
 
@@ -42,51 +74,40 @@ export default function HomePage() {
     setHasSearched(true)
 
     try {
-      const response = await fetch("/api/search", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: trimmed }),
-        signal: controller.signal,
-      })
-
-      let data: WorkflowResponse = {}
-      try { data = await response.json() } catch { data = {} }
-
-      if (!response.ok || data.success === false) {
-        throw new Error(data.error || data.message || `Search failed (${response.status})`)
-      }
-
-      setResults(normalizeResults(data.results))
+      const searchResults = await searchDuckDuckGo(trimmed, controller.signal)
+      setResults(searchResults)
     } catch (err) {
-      if (err instanceof DOMException && err.name === "AbortError") return
+      if (err instanceof DOMException && err.name === "AbortError") {
+        return
+      }
       setResults([])
-      setError(err instanceof Error ? err.message : "Something went wrong. Please try again.")
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Something went wrong. Please try again."
+      )
     } finally {
       setIsLoading(false)
     }
   }
 
-  function normalizeResults(raw: unknown): SearchResult[] {
-    if (!Array.isArray(raw)) return []
-    return raw
-      .filter((item): item is Record<string, unknown> => typeof item === "object" && item !== null)
-      .map((item) => ({
-        title: String(item.title || "Untitled"),
-        url: String(item.url || "#"),
-        snippet: item.snippet != null ? String(item.snippet) : item.description != null ? String(item.description) : undefined,
-        scrapedContent: item.scrapedContent != null ? String(item.scrapedContent) : item.pageContent != null ? String(item.pageContent) : item.content != null ? String(item.content) : undefined,
-      }))
-  }
-
-  React.useEffect(() => { return () => { abortControllerRef.current?.abort() } }, [])
+  React.useEffect(() => {
+    return () => {
+      abortControllerRef.current?.abort()
+    }
+  }, [])
 
   return (
     <PageContainer className="h-full">
       <div className="min-h-[calc(100vh-8rem)] flex flex-col items-center justify-center pt-16 pb-12">
         <div className="w-full max-w-2xl mx-auto text-center px-4">
           <div className="mb-10">
-            <h1 className="text-5xl md:text-6xl font-semibold tracking-tight text-white mb-3">Hermes</h1>
-            <p className="text-lg text-stone-400">Free web search &amp; scrape</p>
+            <h1 className="text-5xl md:text-6xl font-semibold tracking-tight text-white mb-3">
+              Hermes
+            </h1>
+            <p className="text-lg text-stone-400">
+              Free web search & scrape
+            </p>
           </div>
 
           <form onSubmit={handleSearch} className="relative mb-8">
@@ -105,7 +126,11 @@ export default function HomePage() {
                 disabled={isLoading || !query.trim()}
                 className="absolute right-2 top-1/2 -translate-y-1/2 h-10 px-5 rounded-full bg-emerald-600 hover:bg-emerald-500 text-white disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {isLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
+                {isLoading ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Search className="h-4 w-4" />
+                )}
                 <span className="sr-only">Search</span>
               </Button>
             </div>
@@ -126,7 +151,9 @@ export default function HomePage() {
           )}
 
           {!isLoading && hasSearched && results.length === 0 && !error && (
-            <p className="text-stone-500 py-8">No results found. Try a different query.</p>
+            <p className="text-stone-500 py-8">
+              No results found. Try a different query.
+            </p>
           )}
 
           {!isLoading && results.length > 0 && (
@@ -136,6 +163,20 @@ export default function HomePage() {
               ))}
             </div>
           )}
+
+          {hasSearched && !isLoading && (
+            <p className="mt-8 text-xs text-stone-600">
+              For full page scraping, run locally:{" "}
+              <a
+                href="https://github.com/EliasL-git/hermes-search"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-stone-500 hover:text-stone-400 underline"
+              >
+                github.com/EliasL-git/hermes-search
+              </a>
+            </p>
+          )}
         </div>
       </div>
     </PageContainer>
@@ -143,36 +184,24 @@ export default function HomePage() {
 }
 
 function SearchResultCard({ result }: { result: SearchResult }) {
-  const [expanded, setExpanded] = React.useState(false)
-  const hasScrapedContent = result.scrapedContent && result.scrapedContent.trim().length > 0
-
   return (
     <article className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-5 transition-colors hover:border-zinc-700">
-      <a href={result.url} target="_blank" rel="noopener noreferrer" className="group block">
-        <h2 className="text-lg font-medium text-blue-400 group-hover:text-blue-300 group-hover:underline mb-1 truncate">{result.title}</h2>
-        <p className="text-sm text-emerald-500 mb-2 truncate">{result.url}</p>
+      <a
+        href={result.url || "#"}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="group block"
+      >
+        <h2 className="text-lg font-medium text-blue-400 group-hover:text-blue-300 group-hover:underline mb-1 truncate">
+          {result.title || "Untitled"}
+        </h2>
+        <p className="text-sm text-emerald-500 mb-2 truncate">{result.url || "No URL"}</p>
       </a>
 
       {result.snippet && (
-        <p className="text-sm text-stone-300 leading-relaxed line-clamp-3">{result.snippet}</p>
-      )}
-
-      {hasScrapedContent && (
-        <div className="mt-4">
-          <button
-            type="button"
-            onClick={() => setExpanded((prev) => !prev)}
-            className="inline-flex items-center gap-2 text-sm font-medium text-stone-400 hover:text-white transition-colors"
-          >
-            <FileText className="h-4 w-4" />
-            {expanded ? "Hide page content" : "Page content"}
-          </button>
-          {expanded && (
-            <div className="mt-3 rounded-lg bg-zinc-950 border border-zinc-800 p-4">
-              <p className="text-sm text-stone-300 leading-relaxed whitespace-pre-wrap line-clamp-[20]">{result.scrapedContent}</p>
-            </div>
-          )}
-        </div>
+        <p className="text-sm text-stone-300 leading-relaxed line-clamp-3">
+          {result.snippet}
+        </p>
       )}
     </article>
   )
